@@ -25,6 +25,7 @@ from dgl.data import register_data_args, load_data
 from dgl.data import CiteseerGraphDataset, CoraGraphDataset, PubmedGraphDataset,RedditDataset
 import numpy as np
 from dgl.nn import GATConv
+from torch.amp import GradScaler, autocast
 
 from hongtu.embedding_swap_op import HP_T2D, HP_D2T ,comm_hp_d2t, comm_hp_t2d
 from hongtu.my_GAT_hp import GATConvHP
@@ -111,10 +112,10 @@ class GAT(nn.Module):
             #     )
             # )
             
-            cur_size=self.hid_size if l != len(self.layers) - 1 else self.out_size
-            #print(f"Process : x = {cur_size}")
-            dim_split_index = [cur_size// nprocs] * nprocs
-            dim_split_index[-1] += cur_size % nprocs
+            # cur_size=self.hid_size if l != len(self.layers) - 1 else self.out_size
+            # #print(f"Process : x = {cur_size}")
+            # dim_split_index = [cur_size// nprocs] * nprocs
+            # dim_split_index[-1] += cur_size % nprocs
 
             # y_cpu=torch.empty((g.num_nodes(), dim_split_index[proc_id]), pin_memory=True)
             cur_size = self.hid_size * self.num_heads if l != len(self.layers) - 1 else self.out_size
@@ -248,6 +249,7 @@ def train(
         use_uva=use_uva,
     )
     opt = torch.optim.Adam(model.parameters(), lr=0.003, weight_decay=5e-4)
+    scaler = GradScaler("cuda")
     for epoch in range(num_epochs):
         t0 = time.time()
         model.train()
@@ -307,13 +309,17 @@ def train(
                 # input_nodes = input_nodes.to(g.ndata['feat'].device)
                 # x = g.ndata['feat'][input_nodes].to(device)
                 #sys.exit(0)
-
-                y_hat = model(blocks, x)
-
-                loss = F.cross_entropy(y_hat, y)
+                with autocast("cuda"):  # 自动混合精度
+                    y_hat = model(blocks, x)
+                    loss = F.cross_entropy(y_hat, y)
+                # y_hat = model(blocks, x)
+                # loss = F.cross_entropy(y_hat, y)
                 opt.zero_grad()
-                loss.backward()
-                opt.step()
+                # loss.backward()
+                # opt.step()
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
                 total_loss += loss
                 t5=time.time()
                 t4+=t5-t3
