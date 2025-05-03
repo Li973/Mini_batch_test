@@ -281,45 +281,131 @@ def train(
         
 
 
+            # last_block = blocks[-1]
+            # if last_block.ntypes:  # 如果图有多种节点类型
+            #     dst_nodes = {ntype: last_block.dstnodes[ntype].data[dgl.NID].to(device) for ntype in last_block.ntypes}
+            # else:
+            #     dst_nodes = last_block.dstdata[dgl.NID].to(device)
+            # # 提前完成目标节点的随机分组
+            # num_parts = 8
+            # if isinstance(dst_nodes, dict):  # 多节点类型
+            #     shuffled_indices = {ntype: torch.randperm(len(dst_nodes[ntype])).to(device) for ntype in dst_nodes.keys()}
+            #     parted_indices = {ntype: torch.chunk(shuffled_indices[ntype], num_parts) for ntype in dst_nodes.keys()}
+            # else:  # 单节点类型
+            #     shuffled_indices = torch.randperm(len(dst_nodes)).to(device)
+            #     parted_indices = torch.chunk(shuffled_indices, num_parts)
+            # total_loss = 0.0
+            # for i in range(num_parts):
+            #     # 获取当前子图的目标节点
+            #     if isinstance(dst_nodes, dict):  # 多节点类型
+            #         sampled_dst_nodes = {ntype: dst_nodes[ntype][parted_indices[ntype][i]] for ntype in dst_nodes.keys()}
+            #     else:  # 单节点类型
+            #         sampled_dst_nodes = dst_nodes[parted_indices[i]]
+            #     # 构造新的块结构
+            #     new_blocks = []
+            #     for block in reversed(blocks):
+            #         new_block = dgl.to_block(block, dst_nodes=sampled_dst_nodes)
+            #         sampled_dst_nodes = ( 
+            #             {ntype: new_block.srcnodes[ntype].data[dgl.NID] for ntype in new_block.ntypes}
+            #             if new_block.ntypes
+            #             else new_block.srcdata[dgl.NID]
+            #         )
+            #         new_blocks.insert(0, new_block)
+            #     y_hat = model(new_blocks, new_blocks[0].srcdata["feat"])
+            #     labels = new_blocks[-1].dstdata["label"].to(torch.int64)
+            #     loss = F.cross_entropy(y_hat, labels)
+            #     opt.zero_grad()
+            #     loss.backward()
+            #     opt.step()
+            #     total_loss += loss.item()
+
             last_block = blocks[-1]
-            if last_block.ntypes:  # 如果图有多种节点类型
+            if last_block.ntypes:
                 dst_nodes = {ntype: last_block.dstnodes[ntype].data[dgl.NID].to(device) for ntype in last_block.ntypes}
             else:
                 dst_nodes = last_block.dstdata[dgl.NID].to(device)
-            # 提前完成目标节点的随机分组
+
             num_parts = 8
-            if isinstance(dst_nodes, dict):  # 多节点类型
-                shuffled_indices = {ntype: torch.randperm(len(dst_nodes[ntype])).to(device) for ntype in dst_nodes.keys()}
-                parted_indices = {ntype: torch.chunk(shuffled_indices[ntype], num_parts) for ntype in dst_nodes.keys()}
-            else:  # 单节点类型
-                shuffled_indices = torch.randperm(len(dst_nodes)).to(device)
-                parted_indices = torch.chunk(shuffled_indices, num_parts)
-            total_loss = 0.0
+            if isinstance(dst_nodes, dict):
+                main_type = list(dst_nodes.keys())[0]
+                total_dst_nids = dst_nodes[main_type]
+            else:
+                total_dst_nids = dst_nodes
+
+            part_size = (len(total_dst_nids) + num_parts - 1) // num_parts
+            part_blocks_list = []
+
             for i in range(num_parts):
-                # 获取当前子图的目标节点
-                if isinstance(dst_nodes, dict):  # 多节点类型
-                    sampled_dst_nodes = {ntype: dst_nodes[ntype][parted_indices[ntype][i]] for ntype in dst_nodes.keys()}
-                else:  # 单节点类型
-                    sampled_dst_nodes = dst_nodes[parted_indices[i]]
-                # 构造新的块结构
+                start = i * part_size
+                end = min((i + 1) * part_size, len(total_dst_nids))
+                part_nids = total_dst_nids[start:end]
+
+                if isinstance(dst_nodes, dict):
+                    sampled_dst_nodes = {main_type: part_nids}
+                else:
+                    sampled_dst_nodes = part_nids
+
                 new_blocks = []
                 for block in reversed(blocks):
-                    new_block = dgl.to_block(block, dst_nodes=sampled_dst_nodes)
-                    sampled_dst_nodes = ( 
-                        {ntype: new_block.srcnodes[ntype].data[dgl.NID] for ntype in new_block.ntypes}
-                        if new_block.ntypes
-                        else new_block.srcdata[dgl.NID]
-                    )
+                    # # src_ids = block.srcdata[dgl.NID]
+                    # # dst_ids = block.dstdata[dgl.NID]
+                    # # edges_src, edges_dst = block.edges()
+                    # # g = dgl.graph((edges_src, edges_dst), num_nodes=block.number_of_nodes())
+                    # # g.ndata[dgl.NID] = src_ids  # 源节点 ID
+                    # # 将 Block 转换为普通图（保留原始节点 ID）
+                    # subgraph = dgl.in_subgraph(block, {'_U': sampled_dst_nodes} if isinstance(sampled_dst_nodes, dict) else sampled_dst_nodes)
+
+                    # new_block = dgl.to_block(subgraph, dst_nodes=sampled_dst_nodes)
+
+                    # # sub_g = dgl.in_subgraph(g, {'_U': sampled_dst_nodes} if isinstance(sampled_dst_nodes, dict) else sampled_dst_nodes)
+
+
+                    # # new_block = dgl.to_block(sub_g, dst_nodes=sampled_dst_nodes)
+
+
+                    src_ids, dst_ids = block.edges()
+
+
+                    if isinstance(sampled_dst_nodes, dict):
+                        main_type = list(sampled_dst_nodes.keys())[0]
+                        target_nids = sampled_dst_nodes[main_type]
+                    else:
+                        target_nids = sampled_dst_nodes
+
+                    mask = torch.isin(dst_ids, target_nids)
+                    edge_ids = torch.nonzero(mask).squeeze()
+                    # if len(edge_ids) == 0:
+                    #     continue
+                    # print("dst_ids:", dst_ids.shape, dst_ids.dtype, dst_ids.device)
+                    # print("target_nids:", target_nids.shape, target_nids.dtype, target_nids.device)
+                    # print("mask:", mask.shape, mask.dtype)
+                    # print("edge_ids:", edge_ids.shape, edge_ids.dtype)
+                    g = dgl.graph((src_ids, dst_ids), num_nodes=block.num_nodes())
+                    # 提取子图
+                    sub_g = g.edge_subgraph(edge_ids, relabel_nodes=True)
+                    # 转换为新的 Block
+                    new_block = dgl.to_block(sub_g, dst_nodes=sampled_dst_nodes)
+                    if block.ntypes:
+                        for ntype in new_block.srctypes:
+                            src_ids = new_block.srcnodes[ntype].data[dgl.NID]
+                            new_block.srcnodes[ntype].data["feat"] = block.srcnodes[ntype].data["feat"][src_ids]
+                    else:
+                        src_ids = new_block.srcdata[dgl.NID]
+                        new_block.srcdata["feat"] = block.srcdata["feat"][src_ids]
+                    if new_block.ntypes:
+                        sampled_dst_nodes = {ntype: new_block.srcnodes[ntype].data[dgl.NID] for ntype in new_block.ntypes}
+                    else:
+                        sampled_dst_nodes = new_block.srcdata[dgl.NID]
+
                     new_blocks.insert(0, new_block)
+
                 y_hat = model(new_blocks, new_blocks[0].srcdata["feat"])
                 labels = new_blocks[-1].dstdata["label"].to(torch.int64)
                 loss = F.cross_entropy(y_hat, labels)
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
-                total_loss += loss.item()
-
-            
+                total_loss += loss.item()#还有new_blocks[-1].dstdata["label"]，中有label
             # new_blocks = []
             # div = 8 #分成div个子batch
             # for k in range(div):
